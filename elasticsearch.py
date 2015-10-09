@@ -20,6 +20,7 @@ import urllib2
 import socket
 import collections
 
+# Global variables
 PREFIX = "elasticsearch"
 ES_CLUSTER = "elasticsearch"
 ES_HOST = "localhost"
@@ -28,9 +29,25 @@ ES_VERSION = "1.0"
 ES_URL = ""
 VERBOSE_LOGGING = False
 
+# Stat tuple to contextualise our stat information
 Stat = collections.namedtuple('Stat', ('type', 'path'))
 
+# DICT holds the actual stats we're going to look up, it will be generated depending
+# on what version of elasticsearch we have
 STATS_CUR = {}
+
+# DICT of stats relating to clusters
+STATS_CLUSTER = {
+    'cluster.number_of_nodes': Stat("gauge", "cluster.number_of_nodes"),
+    'cluster.active_primary_shards': Stat("gauge", "cluster.active_primary_shards"),
+    'cluster.active_shards': Stat("gauge", "cluster.active_shards"),
+    'cluster.relocating_shards': Stat("gauge", "cluster.relocating_shards"),
+    'cluster.initializing_shards': Stat("gauge", "cluster.initializing_shards"),
+    'cluster.unassigned_shards': Stat("gauge", "cluster.unassigned_shards"),
+    'cluster.delayed_unassigned_shards': Stat("gauge", "cluster.delayed_unassigned_shards"),
+    'cluster.number_of_pending_tasks': Stat("gauge", "cluster.number_of_pending_tasks"),
+    'cluster.number_of_in_flight_fetch': Stat("gauge", "cluster.number_of_in_flight_fetch"),
+}
 
 # DICT: ElasticSearch 1.0.0
 STATS_ES1 = {
@@ -145,11 +162,23 @@ STATS = {
 
 
 # FUNCTION: Collect stats from JSON result
-def lookup_stat(stat, json):
-
-    node = json['nodes'].keys()[0]
-    val = dig_it_up(json, STATS_CUR[stat].path % node)
-
+def lookup_node_stat(stat, json):
+    """
+    Lookup node related data in a set of results.
+    
+    Args:
+        stat(string): The keyed name of the stat to lookup. This is
+            a Stat tuple with a path variable.
+        json(dictionary): The dictionary of results
+    
+    Returns:
+        (string): The value of the stat, None if we couldnt get it
+    """
+    if 'nodes' in json:
+        node = json['nodes'].keys()[0]
+        val = dig_it_up(json, STATS_CUR[stat].path % node)
+    else:
+        return None
     # Check to make sure we have a valid result
     # dig_it_up returns False if no match found
     if not isinstance(val, bool):
@@ -157,10 +186,34 @@ def lookup_stat(stat, json):
     else:
         return None
 
+def lookup_cluster_stat(stat, json):
+    """
+    Lookup cluster related data in a set of results.
+    
+    Args:
+        stat(string): The eyed name of the stat to lookup. This is
+            a Stat tuple with a path variable.
+        json(dictionary): The dictionary of results
+    
+    Returns:
+        (string): The value of the stat, None if we couldnt get it
+    """
+    if 'cluster' in json:
+        val = dig_it_up(json, STATS_CLUSTER[stat].path)
+    else:
+        return None
+    # Check to make sure we have a valid result
+    # dig_it_up returns False if no match found
+    if not isinstance(val, bool):
+        return int(val)
+    else:
+        return None
 
 def configure_callback(conf):
-    """Received configuration information"""
-    global ES_HOST, ES_PORT, ES_URL, ES_VERSION, VERBOSE_LOGGING, STATS_CUR
+    """
+    Callback to handle when we've received configuration information
+    """
+    global ES_HOST, ES_PORT, ES_URL, ES_CLUSTER_URL, ES_VERSION, VERBOSE_LOGGING, STATS_CUR
     for node in conf.children:
         if node.key == 'Host':
             ES_HOST = node.values[0]
@@ -181,7 +234,8 @@ def configure_callback(conf):
     else:
         ES_URL = "http://" + ES_HOST + ":" + str(ES_PORT) + "/_cluster/nodes/_local/stats?http=true&process=true&jvm=true&transport=true&thread_pool=true"
         STATS_CUR = dict(STATS.items() + STATS_ES09.items())
-
+    
+    ES_CLUSTER_URL = "http://" + ES_HOST + ":" + str(ES_PORT) + "/_cluster/health"
     # add info on thread pools
     for pool in ['generic', 'index', 'get', 'snapshot', 'merge', 'optimize', 'bulk', 'warmer', 'flush', 'search', 'refresh']:
       for attr in ['threads', 'queue', 'active', 'largest']:
@@ -195,28 +249,57 @@ def configure_callback(conf):
 
 
 def fetch_stats():
+    """
+    Fetches data from our elasticsearch querying URLs and merges the results together
+    
+    Returns:
+        (dictionary): Dictionary of elasticsearch data. In the format,
+            { 
+                "cluster_name": <cluster name>,
+                "nodes": <nodes data>,
+                "cluster": <cluster data>
+            }
+    """
     global ES_CLUSTER
 
     try:
         result = json.load(urllib2.urlopen(ES_URL, timeout=10))
+        result_cluster = json.load(urllib2.urlopen(ES_CLUSTER_URL, timeout=10))
     except urllib2.URLError, e:
         collectd.error('elasticsearch plugin: Error connecting to %s - %r' % (ES_URL, e))
         return None
     print result['cluster_name']
 
     ES_CLUSTER = result['cluster_name']
+    result.update({"cluster": result_cluster})
     return parse_stats(result)
 
 
 def parse_stats(json):
-    """Parse stats response from ElasticSearch"""
+    """
+    Parse stats response from ElasticSearch
+    
+    Args:
+        json(dictionary): The JSON dictionary of results from our
+            queries to elasticsearch
+    """
     for name, key in STATS_CUR.iteritems():
-        result = lookup_stat(name, json)
+        result = lookup_node_stat(name, json)
+        dispatch_stat(result, name, key)
+    for name, key in STATS_CLUSTER.iteritems():
+        result = lookup_cluster_stat(name, json)
         dispatch_stat(result, name, key)
 
 
 def dispatch_stat(result, name, key):
-    """Read a key from info response data and dispatch a value"""
+    """
+    Read a key from info response data and dispatch a value
+    
+    Args:
+        result(dictionary): The result of the info call to elasticsearch
+        name(string): The name of the metric
+        key(string): The key name of the result value
+    """
     if result is None:
         collectd.warning('elasticsearch plugin: Value not found for %s' % name)
         return
@@ -233,11 +316,26 @@ def dispatch_stat(result, name, key):
 
 
 def read_callback():
+    """
+    Read callback for collectd
+    """
     log_verbose('Read callback called')
     stats = fetch_stats()
 
 
 def dig_it_up(obj, path):
+    """
+    Retrieves the value at the specified dot-separated path
+    
+    Args:
+        obj(dictionary): Dictionary of keyed values to search
+        path(string): Dot-separated string representing the path
+            to a keyed value in the dictionary
+    
+    Returns:
+        (string): The value of the key at the path specified,
+            False if none found
+    """  
     try:
         if type(path) in (str, unicode):
             path = path.split('.')
@@ -247,9 +345,17 @@ def dig_it_up(obj, path):
 
 
 def log_verbose(msg):
+    """
+    Log a verbose message with collectd
+    
+    Args:
+        msg(string): The message to log
+    """
     if not VERBOSE_LOGGING:
         return
     collectd.info('elasticsearch plugin [verbose]: %s' % msg)
 
+
+# Register our callbacks with collectd
 collectd.register_config(configure_callback)
 collectd.register_read(read_callback)
