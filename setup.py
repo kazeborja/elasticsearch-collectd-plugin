@@ -18,7 +18,7 @@ setup(
     name='elasticsearch-collectd-plugin',
     version=version,
     install_requires=[],
-    py_modules=['elasticsearch'],
+    py_modules=['elasticsearch-collectd'],
     author='',
     author_email='platforms@digital.justice.gov.uk',
     maintainer='MOJDS',
