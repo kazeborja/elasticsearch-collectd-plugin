@@ -1,4 +1,4 @@
-elasticsearch-collectd-plugin
+OUTDATED: elasticsearch-collectd-plugin
 =====================
 
 A [ElasticSearch](http://elasticsearch.org) plugin for [collectd](http://collectd.org) using collectd's [Python plugin](http://collectd.org/documentation/manpages/collectd-python.5.shtml).
