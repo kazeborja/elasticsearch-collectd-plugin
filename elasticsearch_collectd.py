@@ -13,13 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import print_function
+
 
 import collections
 import json
-import urllib2
 import base64
 import logging
 import ssl
+
+# Python 2/3 support for urllib2/urllib
+try:
+    from urllib.request import urlopen, Request
+    from urllib.error import HTTPError, URLError
+except ImportError:
+    from urllib2 import urlopen, Request, HTTPError, URLError
 
 PREFIX = "elasticsearch"
 CLUSTERS = []
@@ -580,6 +588,10 @@ THREAD_POOL_METRICS = {
     "counter": ['completed', 'rejected'],
 }
 
+def first_key(d):
+    """Extract the first key from a dict"""
+    return list(d.keys())[0]
+
 
 # collectd callbacks
 def read_callback():
@@ -698,9 +710,10 @@ def remove_deprecated_elements(deprecated, elements, version):
     """Remove deprecated items from a list or dictionary"""
     # Attempt to parse the major, minor, and revision
     (major, minor, revision) = version.split('.')
+    major, minor = int(major), int(minor)
 
     # Sanitize alphas and betas from revision number
-    revision = revision.split('-')[0]
+    revision = int(revision.split('-')[0])
 
     # Iterate over deprecation lists and remove any keys that were deprecated
     # prior to the current version
@@ -882,7 +895,7 @@ class Cluster(object):
 
     # FUNCTION: Collect node stats from JSON result
     def lookup_node_stat(self, stat, json):
-        node = json['nodes'].keys()[0]
+        node = first_key(json['nodes'])
         val = dig_it_up(json, self.node_stats_cur[stat].path % node)
 
         # Check to make sure we have a valid result
@@ -945,7 +958,7 @@ class Cluster(object):
         response = None
         try:
             log.info('Fetching api information from: %s' % url)
-            request = urllib2.Request(url)
+            request = Request(url)
             if self.es_username:
                 authheader = base64.encodestring('%s:%s' %
                                                  (self.es_username,
@@ -955,12 +968,12 @@ class Cluster(object):
             ctx = None
             if self.es_url_scheme == "https":
                 ctx = ssl._create_unverified_context()
-                response = urllib2.urlopen(request, context=ctx, timeout=10)
+                response = urlopen(request, context=ctx, timeout=10)
             else:
-                response = urllib2.urlopen(request, timeout=10)
+                response = urlopen(request, timeout=10)
             log.info('Raw api response: %s' % response)
             return json.load(response)
-        except (urllib2.URLError, urllib2.HTTPError), e:
+        except (URLError, HTTPError) as e:
             log.error('Error connecting to %s - %r : %s' %
                       (url, e, e))
             return None
@@ -985,12 +998,12 @@ class Cluster(object):
             return
 
         # Identify the current node
-        self.node_id = json['nodes'].keys()[0]
+        self.node_id = first_key(json['nodes'])
         log.notice('current node id: %s' % self.node_id)
 
         cluster_name = json['cluster_name']
         # we should have only one entry with the current node information
-        node_info = json['nodes'].itervalues().next()
+        node_info = list(json['nodes'].values())[0]
         version = node_info['version']
         # a node is master eligible by default unless it's configured otherwise
         # Note: settings is deprecated from json starting ES 5.5
@@ -1032,7 +1045,7 @@ class Cluster(object):
 
     def parse_node_stats(self, json, stats):
         """Parse node stats response from ElasticSearch"""
-        for name, key in stats.iteritems():
+        for name, key in stats.items():
             if self.detailed_metrics is True or name in self.defaults:
                 result = self.lookup_node_stat(name, json)
                 self.dispatch_stat(result, name, key)
@@ -1040,13 +1053,13 @@ class Cluster(object):
     def parse_thread_pool_stats(self, json, stats):
         """Parse thread pool stats response from ElasticSearch"""
         for pool in self.thread_pools:
-            for metric_type, value in THREAD_POOL_METRICS.iteritems():
+            for metric_type, value in THREAD_POOL_METRICS.items():
                 for attr in value:
                     name = 'thread_pool.{0}'.format(attr)
                     key = Stat(metric_type, 'nodes.%s.thread_pool.{0}.{1}'.
                                format(pool, attr))
                     if self.detailed_metrics is True or name in self.defaults:
-                        node = json['nodes'].keys()[0]
+                        node = first_key(json['nodes'])
                         result = dig_it_up(json, key.path % node)
                         # Check to make sure we have a valid result
                         # dig_it_up returns False if no match found
@@ -1062,14 +1075,14 @@ class Cluster(object):
         """Parse cluster stats response from ElasticSearch"""
         # convert the status color into a number
         json['status'] = CLUSTER_STATUS[json['status']]
-        for name, key in stats.iteritems():
+        for name, key in stats.items():
             if self.detailed_metrics is True or name in self.defaults:
                 result = dig_it_up(json, key.path)
                 self.dispatch_stat(result, name, key)
 
     def parse_index_stats(self, json, index_name):
         """Parse index stats response from ElasticSearch"""
-        for name, key in self.index_stats_cur.iteritems():
+        for name, key in self.index_stats_cur.items():
             # filter default metrics
             if self.detailed_metrics is True or \
                name.replace("[index={index_name}]", "") in self.defaults:
@@ -1127,7 +1140,7 @@ def sanitize_type_instance(index_name):
     the '/' character. This method does a lossy conversion to ascii and
     replaces the reserved character with '_'
     """
-    ascii_index_name = index_name.encode('ascii', 'ignore')
+    ascii_index_name = index_name.encode('ascii', 'ignore').decode('ascii')
     # '/' is reserved, so we substitute it with '_' instead
     return ascii_index_name.replace('/', '_')
 
@@ -1150,19 +1163,19 @@ class CollectdMock(object):
         self.value_mock = CollectdValuesMock
 
     def debug(self, msg):
-        print 'DEBUG: {0}'.format(msg)
+        print('DEBUG: {0}'.format(msg))
 
     def info(self, msg):
-        print 'INFO: {0}'.format(msg)
+        print('INFO: {0}'.format(msg))
 
     def notice(self, msg):
-        print 'NOTICE: {0}'.format(msg)
+        print('NOTICE: {0}'.format(msg))
 
     def warning(self, msg):
-        print 'WARN: {0}'.format(msg)
+        print('WARN: {0}'.format(msg))
 
     def error(self, msg):
-        print 'ERROR: {0}'.format(msg)
+        print('ERROR: {0}'.format(msg))
         sys.exit(1)
 
     def Values(self, plugin='elasticsearch'):
@@ -1171,7 +1184,7 @@ class CollectdMock(object):
 
 class CollectdValuesMock(object):
     def dispatch(self):
-        print self
+        print(self)
 
     def __str__(self):
         attrs = []
